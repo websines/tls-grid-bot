@@ -41,10 +41,10 @@ interface Order {
 
 export function OrdersTable({ symbol }: { symbol: string }) {
   const [orders, setOrders] = useState<Order[]>([])
+  const [allBotOrders, setAllBotOrders] = useState<Order[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [currentPage, setCurrentPage] = useState(1)
-  const [totalPages, setTotalPages] = useState(1)
   const [pageSize] = useState(10)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [cancellingOrders, setCancellingOrders] = useState<{ [key: string]: boolean }>({})
@@ -52,31 +52,34 @@ export function OrdersTable({ symbol }: { symbol: string }) {
   const api = new XeggexApi(EXCHANGE_API_KEY, EXCHANGE_SECRET_KEY)
   const gridService = GridTradingService.getInstance()
 
-  const loadOrders = async (page: number) => {
+  const loadOrders = async () => {
     try {
       setLoading(true)
       setError(null)
       
-      // Calculate offset
-      const offset = (page - 1) * pageSize
-      
-      // Get orders for current page
-      const ordersForPage = await api.getOpenOrders(symbol, pageSize, offset)
+      // Get all open orders
+      const allOrders = await api.getOpenOrders(symbol, 1000, 0) // Get more orders at once
       
       // Filter and mark bot orders
-      const ordersWithBotStatus = await Promise.all(
-        ordersForPage.map(async (order: Order) => ({
-          ...order,
-          isBot: await gridService.isBotOrder(order.id)
-        }))
+      const botOrders = await Promise.all(
+        allOrders.map(async (order: Order) => {
+          const isBot = await gridService.isBotOrder(order.id)
+          return isBot ? { ...order, isBot } : null
+        })
       )
 
-      // Get total count from API if available, otherwise estimate from current page
-      const totalCount = ordersForPage.length === pageSize ? (page * pageSize) + 1 : page * pageSize
-      const calculatedTotalPages = Math.max(1, Math.ceil(totalCount / pageSize))
-
-      setOrders(ordersWithBotStatus)
-      setTotalPages(calculatedTotalPages)
+      // Filter out non-bot orders and nulls
+      const filteredBotOrders = botOrders.filter((order): order is Order => order !== null)
+      
+      // Store all bot orders
+      setAllBotOrders(filteredBotOrders)
+      
+      // Calculate pagination
+      const startIndex = (currentPage - 1) * pageSize
+      const endIndex = startIndex + pageSize
+      
+      // Set current page orders
+      setOrders(filteredBotOrders.slice(startIndex, endIndex))
       setError(null)
     } catch (err) {
       console.error('Error loading orders:', err)
@@ -88,19 +91,26 @@ export function OrdersTable({ symbol }: { symbol: string }) {
   }
 
   useEffect(() => {
-    loadOrders(currentPage)
-    const interval = setInterval(() => loadOrders(currentPage), 10000)
+    loadOrders()
+    // Refresh every 30 seconds instead of 10
+    const interval = setInterval(loadOrders, 30000)
     return () => clearInterval(interval)
-  }, [currentPage, symbol])
+  }, [symbol]) // Remove currentPage dependency
 
   const handleRefresh = async () => {
     setIsRefreshing(true)
-    await loadOrders(currentPage)
+    await loadOrders()
   }
 
   const handlePageChange = (page: number) => {
     setCurrentPage(page)
+    // Calculate new page slice from allBotOrders
+    const startIndex = (page - 1) * pageSize
+    const endIndex = startIndex + pageSize
+    setOrders(allBotOrders.slice(startIndex, endIndex))
   }
+
+  const totalPages = Math.max(1, Math.ceil(allBotOrders.length / pageSize))
 
   const formatDate = (dateStr: string) => {
     return new Date(dateStr).toLocaleString()
