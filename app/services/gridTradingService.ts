@@ -10,7 +10,7 @@ export class GridTradingService {
   private baseUrl: string;
   private lastGridUpdate: number = 0;
   private lastPrice: number = 0;
-  private readonly GRID_UPDATE_INTERVAL = 30 * 60 * 1000; // 30 minutes in milliseconds
+  private readonly GRID_UPDATE_INTERVAL = 15 * 60 * 1000; // 2 minutes in milliseconds
   private readonly PRICE_CHANGE_THRESHOLD = 2; // 2% price change threshold
   private profitStats = {
     totalProfit: 0,
@@ -18,6 +18,8 @@ export class GridTradingService {
     profitableTrades: 0,
     lastOptimization: 0
   };
+  private orderMonitoringInterval: NodeJS.Timeout | null = null;
+  private gridUpdateInterval: NodeJS.Timeout | null = null;
 
   private constructor() {
     this.api = new XeggexApi(EXCHANGE_API_KEY, EXCHANGE_SECRET_KEY);
@@ -291,41 +293,101 @@ export class GridTradingService {
   private async checkAndUpdateGrid() {
     if (!this.isRunning || !this.config) return;
 
-    const now = Date.now();
-    const ticker = await this.api.getTicker(this.config.symbol);
-    const currentPrice = parseFloat(ticker.last_price);
+    try {
+      const now = Date.now();
+      const ticker = await this.api.getTicker(this.config.symbol);
+      const currentPrice = parseFloat(ticker.last_price);
 
-    // Calculate price change percentage
-    const priceChangePercent = this.lastPrice > 0 
-      ? Math.abs((currentPrice - this.lastPrice) / this.lastPrice * 100)
-      : 0;
+      // Calculate price change percentage
+      const priceChangePercent = this.lastPrice > 0 
+        ? Math.abs((currentPrice - this.lastPrice) / this.lastPrice * 100)
+        : 0;
 
-    const timeElapsed = now - this.lastGridUpdate;
-    const shouldUpdateTime = timeElapsed >= this.GRID_UPDATE_INTERVAL;
-    const shouldUpdatePrice = priceChangePercent >= this.PRICE_CHANGE_THRESHOLD;
+      const timeElapsed = now - this.lastGridUpdate;
+      const shouldUpdateTime = timeElapsed >= this.GRID_UPDATE_INTERVAL;
+      const shouldUpdatePrice = priceChangePercent >= this.PRICE_CHANGE_THRESHOLD;
 
-    if (shouldUpdateTime || shouldUpdatePrice) {
-      console.log(`Recreating grid due to: ${shouldUpdateTime ? 'time interval' : 'price change'}`);
-      console.log(`Time elapsed: ${timeElapsed / 1000 / 60} minutes`);
-      console.log(`Price change: ${priceChangePercent.toFixed(2)}%`);
+      console.log('Grid update check:', {
+        currentTime: new Date(now).toISOString(),
+        lastUpdate: new Date(this.lastGridUpdate).toISOString(),
+        timeElapsed: `${(timeElapsed / 1000 / 60).toFixed(2)} minutes`,
+        currentPrice: currentPrice,
+        lastPrice: this.lastPrice,
+        priceChange: `${priceChangePercent.toFixed(2)}%`,
+        shouldUpdateTime,
+        shouldUpdatePrice
+      });
 
-      // Store current config
-      const currentConfig = { ...this.config };
+      if (shouldUpdateTime || shouldUpdatePrice) {
+        console.log(`Recreating grid due to: ${shouldUpdateTime ? 'time interval' : 'price change'}`);
+        console.log(`Time elapsed: ${timeElapsed / 1000 / 60} minutes`);
+        console.log(`Price change: ${priceChangePercent.toFixed(2)}%`);
 
-      // Stop current grid
-      await this.stopGrid();
+        // Store current config and state
+        const currentConfig = { ...this.config };
+        const wasRunning = this.isRunning;
+        console.log('Current config before recreation:', currentConfig);
 
-      // Start new grid with same config
-      await this.startGrid(currentConfig);
+        try {
+          // First verify we can get the current orders
+          const openOrders = await this.api.getOpenOrders(this.config.symbol);
+          console.log(`Found ${openOrders.length} open orders before grid recreation`);
 
-      // Update timestamps and price
-      this.lastGridUpdate = now;
-      this.lastPrice = currentPrice;
+          // Temporarily mark as not running to prevent other updates
+          this.isRunning = false;
+
+          // Cancel orders one by one, ignoring errors
+          const botOrders = await this.getBotOrders(this.config.symbol);
+          for (const orderId of botOrders) {
+            try {
+              await this.api.cancelOrder(orderId);
+              console.log(`Successfully cancelled order ${orderId}`);
+            } catch (error) {
+              console.log(`Could not cancel order ${orderId}, might be already cancelled:`, error);
+            }
+            // Always remove from tracking
+            await this.removeBotOrder(orderId, this.config.symbol);
+          }
+
+          // Start new grid with same config
+          await this.startGrid(currentConfig);
+          console.log('Grid recreated successfully');
+
+          // Update timestamps and price
+          this.lastGridUpdate = now;
+          this.lastPrice = currentPrice;
+        } catch (error) {
+          console.error('Error during grid recreation:', error);
+          // Restore running state if there was an error
+          this.isRunning = wasRunning;
+          // Try to restore the grid to its previous state
+          if (wasRunning) {
+            try {
+              await this.startGrid(currentConfig);
+              console.log('Restored grid to previous state after error');
+            } catch (restoreError) {
+              console.error('Failed to restore grid:', restoreError);
+              this.isRunning = false;
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error in checkAndUpdateGrid:', error);
     }
   }
 
-  private startOrderMonitoring() {
-    setInterval(async () => {
+  private async startOrderMonitoring() {
+    // Clear any existing intervals
+    if (this.orderMonitoringInterval) {
+      clearInterval(this.orderMonitoringInterval);
+    }
+    if (this.gridUpdateInterval) {
+      clearInterval(this.gridUpdateInterval);
+    }
+
+    // Start order monitoring
+    this.orderMonitoringInterval = setInterval(async () => {
       if (!this.isRunning || !this.config) return;
 
       try {
@@ -337,13 +399,18 @@ export class GridTradingService {
           orderId => !openOrders.find((o: any) => o.id === orderId)
         );
 
+        console.log(`Checking orders - Open: ${openOrders.length}, Bot: ${botOrders.length}, Filled: ${filledOrders.length}`);
+
         // Handle filled orders
         for (const orderId of filledOrders) {
           try {
             // Get order details from exchange
             const orderDetails = await this.api.getOpenOrders(this.config.symbol, 500, 0);
+            console.log('Order details for filled order:', orderDetails);
             
-            if (orderDetails.status === 'filled') {
+            if (orderDetails && orderDetails.status === 'filled') {
+              console.log(`Processing filled order ${orderId}`);
+              
               // Update stats with the filled order
               await this.updateStats(this.config.symbol, orderDetails);
               
@@ -363,7 +430,7 @@ export class GridTradingService {
     }, 10000);
 
     // Add grid update check
-    setInterval(async () => {
+    this.gridUpdateInterval = setInterval(async () => {
       try {
         await this.checkAndUpdateGrid();
       } catch (error) {
@@ -389,6 +456,16 @@ export class GridTradingService {
     }
 
     try {
+      // Clear monitoring intervals
+      if (this.orderMonitoringInterval) {
+        clearInterval(this.orderMonitoringInterval);
+        this.orderMonitoringInterval = null;
+      }
+      if (this.gridUpdateInterval) {
+        clearInterval(this.gridUpdateInterval);
+        this.gridUpdateInterval = null;
+      }
+
       // Clear all bot orders
       const symbol = this.config?.symbol || 'TLS/USDT';
       const botOrders = await this.getBotOrders(symbol);
@@ -471,23 +548,37 @@ export class GridTradingService {
       };
       
       // Calculate profit for this trade
-      const tradeProfit = parseFloat(trade.price) * parseFloat(trade.quantity) * 
-        (trade.side === 'sell' ? 1 : -1);
-      const tradeVolume = parseFloat(trade.price) * parseFloat(trade.quantity);
+      const price = parseFloat(trade.price);
+      const quantity = parseFloat(trade.quantity);
+      const tradeVolume = price * quantity;
+      
+      // For buy orders, we spend money (negative profit)
+      // For sell orders, we receive money (positive profit)
+      const tradeProfit = trade.side === 'sell' ? tradeVolume : -tradeVolume;
+      
+      console.log('Updating stats with trade:', {
+        price,
+        quantity,
+        volume: tradeVolume,
+        profit: tradeProfit,
+        side: trade.side
+      });
       
       // Update stats
       const updatedStats = {
-        totalProfit: currentStats.totalProfit + tradeProfit,
-        totalTrades: currentStats.totalTrades + 1,
-        profitableTrades: currentStats.profitableTrades + (tradeProfit > 0 ? 1 : 0),
+        totalProfit: (currentStats.totalProfit || 0) + tradeProfit,
+        totalTrades: (currentStats.totalTrades || 0) + 1,
+        profitableTrades: (currentStats.profitableTrades || 0) + (tradeProfit > 0 ? 1 : 0),
         lastTradeTime: Date.now(),
-        lastTradePrice: parseFloat(trade.price),
+        lastTradePrice: price,
         lastTradeType: trade.side,
-        highestPrice: Math.max(currentStats.highestPrice, parseFloat(trade.price)),
-        lowestPrice: Math.min(currentStats.lowestPrice || parseFloat(trade.price), parseFloat(trade.price)),
-        volume24h: currentStats.volume24h + tradeVolume,
+        highestPrice: Math.max(currentStats.highestPrice || 0, price),
+        lowestPrice: currentStats.lowestPrice ? Math.min(currentStats.lowestPrice, price) : price,
+        volume24h: (currentStats.volume24h || 0) + tradeVolume,
         updatedAt: Date.now()
       };
+
+      console.log('Updated stats:', updatedStats);
 
       // Save updated stats
       await fetch(`${this.baseUrl}/api/bot/stats`, {
