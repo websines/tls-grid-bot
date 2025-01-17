@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { GridTradingService } from '@/app/services/gridTradingService';
 
 // Create a singleton instance of the service
-const gridService = new GridTradingService();
+const gridService = GridTradingService.getInstance();
 
 export async function POST(request: Request) {
   try {

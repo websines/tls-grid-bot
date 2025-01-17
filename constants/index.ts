@@ -3,6 +3,21 @@ export const EXCHANGE_SECRET_KEY = '8400d116bffae7ab3895f46c16109c84e9fc4ac19b5d
 
 export const DB_PATH = 'grid-bot.db'
 
+export interface GridConfig {
+  symbol: string
+  minDistance: number
+  maxDistance: number
+  gridLines: number
+  totalInvestment: number
+}
+
+export interface BotState {
+  id: number
+  isRunning: boolean
+  config: GridConfig | null
+  lastUpdate: number
+}
+
 export interface GridOrder {
   id: string
   symbol: string
@@ -13,6 +28,7 @@ export interface GridOrder {
   status: string
   timestamp: number
   profit?: number
+  isBotOrder: boolean
 }
 
 export interface GridStats {
