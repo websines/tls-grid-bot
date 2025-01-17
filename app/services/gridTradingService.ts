@@ -97,9 +97,9 @@ export class GridTradingService {
 
   private async calculateDynamicGridSpacing(symbol: string): Promise<number> {
     try {
-      // Get 24h ticker data
       const ticker = await this.api.getTicker(symbol);
       if (!ticker || !ticker.high || !ticker.low) {
+        console.log('No ticker data available, using default spacing');
         return this.config?.maxDistance || 5;
       }
 
@@ -108,15 +108,19 @@ export class GridTradingService {
       const lowPrice = parseFloat(ticker.low);
       const priceRange = ((highPrice - lowPrice) / lowPrice) * 100;
       
+      console.log('Price range calculation:', {
+        highPrice: highPrice.toFixed(8),
+        lowPrice: lowPrice.toFixed(8),
+        range: priceRange.toFixed(2) + '%'
+      });
+      
       // Calculate dynamic spacing
-      // If 24h volatility is 10%, we might want grid spacing of 5% (half the range)
-      // Minimum 1% spacing, maximum 10% spacing
       const minSpacing = 1;
       const maxSpacing = 10;
-      const volatilityFactor = 0.5; // Use half of the total range for safer grid placement
+      const volatilityFactor = 0.5;
       const dynamicSpacing = Math.min(Math.max(priceRange * volatilityFactor, minSpacing), maxSpacing);
       
-      console.log(`Dynamic grid spacing calculated: ${dynamicSpacing.toFixed(2)}% (based on 24h range: ${priceRange.toFixed(2)}%)`);
+      console.log(`Dynamic grid spacing: ${dynamicSpacing.toFixed(2)}% (based on 24h range: ${priceRange.toFixed(2)}%)`);
       return dynamicSpacing;
     } catch (error) {
       console.error('Error calculating dynamic grid spacing:', error);
@@ -385,24 +389,48 @@ export class GridTradingService {
     }
 
     try {
+      // Clear all bot orders
       const symbol = this.config?.symbol || 'TLS/USDT';
-      const openOrders = await this.api.getOpenOrders(symbol);
       const botOrders = await this.getBotOrders(symbol);
-
+      
       // Cancel all bot orders
-      for (const order of openOrders) {
-        if (botOrders.includes(order.id)) {
-          try {
-            await this.api.cancelOrder(order.id);
-            await this.removeBotOrder(order.id, symbol);
-          } catch (error) {
-            console.error(`Failed to cancel order ${order.id}:`, error);
-          }
+      for (const orderId of botOrders) {
+        try {
+          await this.api.cancelOrder(orderId);
+        } catch (error) {
+          // Ignore cancellation errors as the order might already be filled/cancelled
+          console.log(`Order ${orderId} might already be cancelled or filled:`, error);
         }
+        // Always remove from our tracking regardless of cancel success
+        await this.removeBotOrder(orderId, symbol);
       }
+
+      // Reset stats
+      await fetch(`${this.baseUrl}/api/bot/stats`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol,
+          stats: {
+            totalProfit: 0,
+            totalTrades: 0,
+            profitableTrades: 0,
+            highestPrice: 0,
+            lowestPrice: 0,
+            volume24h: 0,
+            updatedAt: Date.now()
+          }
+        })
+      });
 
       this.isRunning = false;
       this.config = null;
+      this.profitStats = {
+        totalProfit: 0,
+        trades: 0,
+        profitableTrades: 0,
+        lastOptimization: 0
+      };
       await this.saveState();
     } catch (error) {
       console.error('Error stopping grid:', error);
@@ -429,22 +457,37 @@ export class GridTradingService {
 
   private async updateStats(symbol: string, trade: any) {
     try {
-      // Update existing stats
-      const stats = await this.getStats(symbol);
+      // Get current stats
+      const response = await fetch(`${this.baseUrl}/api/bot/stats?symbol=${encodeURIComponent(symbol)}`);
+      const data = await response.json();
+      const currentStats = data.status === 'success' ? data.data : {
+        totalProfit: 0,
+        totalTrades: 0,
+        profitableTrades: 0,
+        highestPrice: 0,
+        lowestPrice: parseFloat(trade.price),
+        volume24h: 0,
+        updatedAt: Date.now()
+      };
       
       // Calculate profit for this trade
       const tradeProfit = parseFloat(trade.price) * parseFloat(trade.quantity) * 
         (trade.side === 'sell' ? 1 : -1);
+      const tradeVolume = parseFloat(trade.price) * parseFloat(trade.quantity);
       
-      // Update profit stats
-      this.profitStats.totalProfit += tradeProfit;
-      this.profitStats.trades += 1;
-      if (tradeProfit > 0) {
-        this.profitStats.profitableTrades += 1;
-      }
-
-      // Try to optimize grid parameters
-      await this.optimizeGridParameters();
+      // Update stats
+      const updatedStats = {
+        totalProfit: currentStats.totalProfit + tradeProfit,
+        totalTrades: currentStats.totalTrades + 1,
+        profitableTrades: currentStats.profitableTrades + (tradeProfit > 0 ? 1 : 0),
+        lastTradeTime: Date.now(),
+        lastTradePrice: parseFloat(trade.price),
+        lastTradeType: trade.side,
+        highestPrice: Math.max(currentStats.highestPrice, parseFloat(trade.price)),
+        lowestPrice: Math.min(currentStats.lowestPrice || parseFloat(trade.price), parseFloat(trade.price)),
+        volume24h: currentStats.volume24h + tradeVolume,
+        updatedAt: Date.now()
+      };
 
       // Save updated stats
       await fetch(`${this.baseUrl}/api/bot/stats`, {
@@ -452,13 +495,18 @@ export class GridTradingService {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           symbol,
-          stats: {
-            ...stats,
-            totalProfit: (stats.totalProfit || 0) + tradeProfit,
-            trades: (stats.trades || 0) + 1
-          }
+          stats: updatedStats
         })
       });
+
+      // Update local stats for optimization
+      this.profitStats = {
+        totalProfit: updatedStats.totalProfit,
+        trades: updatedStats.totalTrades,
+        profitableTrades: updatedStats.profitableTrades,
+        lastOptimization: this.profitStats.lastOptimization
+      };
+
     } catch (error) {
       console.error('Error updating stats:', error);
     }
