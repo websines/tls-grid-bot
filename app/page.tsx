@@ -115,9 +115,9 @@ export default function Home() {
             {isRunning && config && (
               <div className="rounded-lg border border-gray-700 p-4 bg-gray-900/50">
                 <h3 className="font-medium mb-4 text-gray-300">Current Configuration</h3>
-                <div className="space-y-2">
+                <div className="space-y-3">
                   <div className="flex justify-between items-center">
-                    <span className="text-gray-400">Symbol</span>
+                    <span className="text-gray-400">Trading Pair</span>
                     <span className="font-mono text-cyan-300">{config.symbol}</span>
                   </div>
                   <div className="flex justify-between items-center">
@@ -125,8 +125,31 @@ export default function Home() {
                     <span className="font-mono text-cyan-300">{config.gridLines}</span>
                   </div>
                   <div className="flex justify-between items-center">
+                    <span className="text-gray-400">Min Distance</span>
+                    <span className="font-mono text-cyan-300">{config.minDistance}%</span>
+                  </div>
+                  <div className="flex justify-between items-center">
                     <span className="text-gray-400">Max Distance</span>
                     <span className="font-mono text-cyan-300">{config.maxDistance}%</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-400">Total Investment</span>
+                    <span className="font-mono text-cyan-300">{config.totalInvestment.toLocaleString()} USDT</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-400">Investment Per Grid</span>
+                    <span className="font-mono text-cyan-300">
+                      {(config.totalInvestment / (config.gridLines - 1)).toLocaleString()} USDT
+                    </span>
+                  </div>
+                  <div className="mt-4 pt-4 border-t border-gray-700">
+                    <div className="text-sm text-gray-400">
+                      Grid will auto-adjust when:
+                      <ul className="list-disc list-inside mt-2 space-y-1">
+                        <li>Price changes by ≥ 2%</li>
+                        <li>Every 30 minutes</li>
+                      </ul>
+                    </div>
                   </div>
                 </div>
               </div>
